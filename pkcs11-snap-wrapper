@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (C) 2020-2022 Canonical, Ltd.
+# Copyright (C) 2020 Canonical, Ltd.
 #
 # This program is free software: you can redistribute it and/or modify it
 # under the terms of the the GNU General Public License version 3, as
@@ -16,170 +16,146 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-# In order to use this wrapper with snapd, export path to where it is located
-# e.g. $ export SNAPD_EXT_KEYMGR=${HOME}/bin/pkcs11-snap-wrapper
-# Following commands are expecte to be handled by the wrapper
-# features:
+# This reference implementation includes a function for generating an
+# appropriate key.
+# 
+# In order to use this wrapper with snapd and snapcraft, export the fully
+# qualified path to it e.g.:
+# export SNAPD_EXT_KEYMGR=${HOME}/bin/pkcs11-snap-wrapper
+# 
+# The following commands are expected to be handled by the wrapper, per snapd:
+# features
 #   output: {"signing": ["RSA-PKCS"], "public-keys": ["DER"]}
 #
-# key-names:
-#   pkcs11-tool -l --pin <pin> --list-objects --type pubkey
+# key-names
 #   output: {"key-names": ["<key 1>", "<key 2>"]}
+#   reference: pkcs11-tool -l --pin <pin> --list-objects --type pubkey
 #
 # get-public-key -f DER -k <key-name>
-#   pkcs11-tool -l --pin <pin> --read-object --type pubkey --label <key-name>
-#   output: to the stdout
+#   output: to stdout
+#   reference: pkcs11-tool -l --pin <pin> --read-object --type pubkey --label <key-name>
 #
 # sign -m RSA-PKCS -k <key-name>
 #   input: from stdin
 #   output: to stdout
-#  echo "DATA" | pkcs11-tool -s --pin <pin> --label <key-name> -m RSA-PKCS
-#
-# Additional supported features
+#   reference: echo "DATA" | pkcs11-tool -s --pin <pin> --label <key-name> -m RSA-PKCS
 
-if [ -n "${PKCS11_PIN}" ] ; then
-  PIN="--pin "${PKCS11_PIN}""
-fi
-
-print_help() {
-  echo -e "Wrapper for pkcs11-tool to be used with snap client"
-  echo -e "In order to use this wrapper with snapd, export path to where it is located"
-  echo -e "\$ export SNAPD_EXT_KEYMGR=${HOME}/bin/pkcs11-snap-wrapper"
-  echo -e "\tThis wrapper allows use of HSM modules like Nitrokey HSM"
-  echo -e "\tto be used for assertion signing"
-  echo -e "\tSupported commands:"
-  echo -e "\t\tfeatures: get list of features"
-  echo -e "\t\tkey-names: get list of public key names"
-  echo -e "\t\tlist-keys: get detailed list of public keys"
-  echo -e "\t\tget-public-key: get public key"
-  echo -e "\t\t\treuired parameters: -k <key name>, -f <key format/DER>"
-  echo -e "\t\tsign: sign data from stdin"
-  echo -e "\t\t\treuired parameters: -k <key name>, -m <mechanism/RSA-PKCS"
-  echo -e "\t\tgenerate-key: generate key suitable for assertion signig"
-  echo -e "\t\t\treuired parameters: -k <key name>, -t <key type/rsa:4096>"
-  echo -e "\t\thelp: this help"
+help() {
+  printf "A wrapper for pkcs11-tool intended to be used by snapd|snapcraft\n\n"
+  printf "To use this wrapper with snapd and snapcraft, export the fully qualified path to it, e.g.:\n\n"
+  printf "\texport SNAPD_EXT_KEYMGR=\${HOME}/bin/pkcs11-snap-wrapper\n\n"
+  printf "This wrapper allows using crypto tokens like the Nitrokey HSM to sign assertions.\n\n"
+  printf "Supported commands:\n"
+  printf "\thelp: this help\n"
+  printf "\tfeatures: get the list of features\n"
+  printf "\tkey-names: get the list of public key names\n"
+  printf "\tlist-keys: get a detailed list of public keys\n"
+  printf "\tget-public-key: get a public key\n"
+  printf "\t\trequired parameters: -k <key name>, -f <key format/DER>\n"
+  printf "\tsign: sign data from stdin\n"
+  printf "\t\trequired parameters: -k <key name>, -m <mechanism/RSA-PKCS>\n"
+  printf "\tgenerate-key: generate a key suitable for assertion signing\n"
+  printf "\t\trequired parameters: -k <key name>, -t <key type/rsa:4096>\n"
 }
 
-get_key_id_from_name() {
-  pkcs11-tool -l ${PIN} --list-objects --type pubkey | sed -n '/'"${1}"'/{n;p}' | awk '{print $2}'
-}
-
-get_features() {
+# features returns the HSM features supported by the wrapper script
+features() {
   echo '{"signing": ["RSA-PKCS"], "public-keys": ["DER"]}'
 }
 
-get_key_names() {
-  local key_names="$(pkcs11-tool -l ${PIN} --list-objects --type pubkey | sed -n  's/.*label:[[:space:]]*\(.*\)/"\1"/p'| tr '\n' ',')"
+# list_keys returns a verbose list of all public keys available in the HSM
+list_keys() {
+  pkcs11-tool -l --pin "${PIN}" --list-objects --type pubkey
+}
+
+# key_names returns a list of keys by label stored in the HSM
+key_names() {
+  key_names="$(list_keys                                    |
+               sed -n 's/.*label:[[:space:]]*\(.*\)/"\1"/p' |
+               tr '\n' ',')"
+
+  [ -n "${key_names}" ] || {
+    echo "No keys on HSM! Please create at least one key."
+    exit 1
+  }
+
   echo "{\"key-names\": [${key_names::-1}]}"
 }
 
-list_pub_keys() {
-  pkcs11-tool -l ${PIN} --list-objects --type pubkey
-}
-
+# get_public_key returns a public key specified by label
+# Expected: -f DER -k <key-name>
 get_public_key() {
-  # expected: -f DER -k <key-name>
-  if [ -z "${key_format}" ] || [ -z "${key_name}" ]; then
-    echo "Missing compulsory params for get public key: [key name, key format]"
-    exit 1
-  fi
-  if [ "${key_format}" != "DER" ];then
-    echo "Unsupported key format: ${key_format}"
-    exit 1
-  fi
-  pkcs11-tool -l ${PIN} --read-object --type pubkey --label "${key_name}"
+  # Check that all parameters are set
+  { [ -n "${key_format}" ] && [ -n "${key_name}" ]; } ||
+  { echo "Missing required parameter: [key name, key format]"; exit 1; }
+
+  # Check for correct format
+  [ "${key_format}" = "DER" ] || { echo "Unsupported key format: ${key_format}"; exit 1; }
+
+  pkcs11-tool -l --pin "${PIN}" --read-object --type pubkey --label "${key_name}"
 }
 
-do_sign() {
-  # expected: -m RSA-PKCS -k <key-name>
-  if [ -z "${mechanism}" ] || [ -z "${key_name}" ]; then
-    echo "Missing compulsory params for signing: [key name, mechanism]"
-    exit 1
-  fi
-  # there is bug in pkcs11 for signing operation, key label is not honoured
-  # get key id based on the key name first
-  local key_id=$(pkcs11-tool -l ${PIN} --list-objects --type pubkey | sed -n '/'"${key_name}"'/{n;p}' | awk '{print $2}')
+# sign performs a signing operation with a specified key
+# Expected: -m RSA-PKCS -k <key-name>
+sign() {
+  # Check that all parameters are set
+  { [ -n "${mechanism}" ] && [ -n "${key_name}" ]; } ||
+  { echo "Missing required parameter: [key name, mechanism]"; exit 1; }
 
-  # signing buf is  coming from stdin
-  pkcs11-tool -s ${PIN} -m "${mechanism}" --id "${key_id}"
+  # There is a bug in pkcs11 for signing operation and the key label is not
+  # honoured. Get key ID based on the key name first.
+  key_id=$(list_keys                       |
+           sed -n '/'"${key_name}"'/{n;p}' |
+           awk '{print $2}')
+
+  # Sign input from stdin
+  pkcs11-tool -s --pin "${PIN}" -m "${mechanism}" --id "${key_id}"
 }
 
-do_generate_key() {
-  # expected key type:size, key name
-  # pkcs11-tool -l --pin <pin> --keypairgen --key-type rsa:4096 --label <key-name>
-  if [ -z "${key_type}" ] || [ -z "${key_name}" ]; then
-    echo "Missing compulsory params: [key name, key type]"
-    exit 1
-  fi
-  if [ "${key_type}" != "rsa:4096" ]; then
-    echo "Not suitable key type for snap assertion. Supported type: rsa:4096"
-    exit 1
-  fi
-  pkcs11-tool -l ${PIN} --keypairgen --key-type "${key_type}" --label "${key_name}"
+# generate_key generates a key in the HSM
+# Expected key type:size, key name
+generate_key() {
+  # Check that all parameters are set
+  { [ -n "${key_type}" ] && [ -n "${key_name}" ]; } ||
+  { echo "Missing required parameter: [key name, key type]" ; exit 1; }
+
+  # Check for correct type
+  [ "${key_type}" = "rsa:4096" ] || { echo "Unsupporrted key type: ${key_type}"; exit 1; }
+
+  # Generate key pair
+  pkcs11-tool -l --pin "${PIN}" --keypairgen --key-type "${key_type}" --label "${key_name}"
 }
 
-# parse arguments
-cmd=${1}
-shift
-while [ -n "${1}" ]
-do
+# PKCS11_PIN must be exported
+[ -n "${PKCS11_PIN}" ] || {
+  echo "Please export your HSM's user PIN as PKCS11_PIN"
+  exit 1
+}
+
+# PIN is the short name for PKCS11_PIN :)
+PIN="${PKCS11_PIN}"
+
+# Parse arguments
+cmd=${1}; shift
+while [ -n "${1}" ]; do
   case ${1} in
-    -k)
-      key_name="${2}"
-      shift
-      ;;
-    -t)
-      # we only support rsa:4096 key type
-      key_type="${2}"
-      shift
-      ;;
-    -m)
-      # we only support RSA-PKCS mechanism for now
-      mechanism="${2}"
-      shift
-      ;;
-    -f)
-      # we only support DER for now
-      key_format="${2}"
-      shift
-      ;;
-    *)
-      echo "Unsupported argument: ${1}"
-      exit 1
-      ;;
+    -k) key_name="${2}"; shift   ;;
+    -t) # Only rsa:4096 keys are supported
+        key_type="${2}"; shift   ;;
+    -m) # Only RSA-PKCS mechanism is supported
+        mechanism="${2}"; shift  ;;
+    -f) # Only DER key format is supported
+        key_format="${2}"; shift ;;
+    *)  echo "Unsupported argument: ${1}"; exit 1 ;;
   esac
+
   shift
 done
 
-# handle command
+# Handle command
+_cmd="${cmd//-/_}"
 case ${cmd} in
-  features)
-    get_features
-    ;;
-  key-names)
-    get_key_names
-    ;;
-  list-keys)
-    list_pub_keys
-    ;;
-  get-public-key)
-    shift
-    get_public_key
-    ;;
-  sign)
-    shift
-    do_sign
-    ;;
-  generate-key)
-    shift
-    do_generate_key
-    ;;
-  help)
-    print_help
-    ;;
-  *)
-    echo "Unsupported command ${cmd}!!"
-    print_help
-    exit 1
-    ;;
+  features|key-names|list-keys|help)       "$_cmd"    ;;
+  sign|generate-key|get-public-key) shift; "$_cmd"    ;;
+  *) echo "Unsupported command: ${cmd}"; help; exit 1 ;;
 esac
