@@ -65,7 +65,7 @@ features() {
 
 # list_keys returns a verbose list of all public keys available in the HSM
 list_keys() {
-  pkcs11-tool -l --pin "${PIN}" --list-objects --type pubkey
+  pkcs11-tool -l --pin env:PKCS11_PIN --list-objects --type pubkey
 }
 
 # key_names returns a list of keys by label stored in the HSM
@@ -92,7 +92,7 @@ get_public_key() {
   # Check for correct format
   [ "${key_format}" = "DER" ] || { echo "Unsupported key format: ${key_format}"; exit 1; }
 
-  pkcs11-tool -l --pin "${PIN}" --read-object --type pubkey --label "${key_name}"
+  pkcs11-tool -l --pin env:PKCS11_PIN --read-object --type pubkey --label "${key_name}"
 }
 
 # sign performs a signing operation with a specified key
@@ -109,7 +109,7 @@ sign() {
            awk '{print $2}')
 
   # Sign input from stdin
-  pkcs11-tool -s --pin "${PIN}" -m "${mechanism}" --id "${key_id}"
+  pkcs11-tool -s --pin env:PKCS11_PIN -m "${mechanism}" --id "${key_id}"
 }
 
 # generate_key generates a key in the HSM
@@ -123,7 +123,7 @@ generate_key() {
   [ "${key_type}" = "rsa:4096" ] || { echo "Unsupporrted key type: ${key_type}"; exit 1; }
 
   # Generate key pair
-  pkcs11-tool -l --pin "${PIN}" --keypairgen --key-type "${key_type}" --label "${key_name}"
+  pkcs11-tool -l --pin env:PKCS11_PIN --keypairgen --key-type "${key_type}" --label "${key_name}"
 }
 
 # PKCS11_PIN must be exported
@@ -131,9 +131,6 @@ generate_key() {
   echo "Please export your HSM's user PIN as PKCS11_PIN"
   exit 1
 }
-
-# PIN is the short name for PKCS11_PIN :)
-PIN="${PKCS11_PIN}"
 
 # Parse arguments
 cmd=${1}; shift
